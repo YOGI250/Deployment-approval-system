@@ -1,0 +1,17 @@
+{
+  "_comment": "Risk thresholds used by risk_scorer.py to calibrate the AI's judgment. Editable without touching code. adjust_thresholds.py can update this file automatically based on real outcomes logged in the audit trail -- this is what makes 'adjust risk thresholds dynamically based on pipeline performance' (from the brief) a real, runnable mechanism rather than a static prompt.",
+  "low": {
+    "max_files_changed": 15,
+    "min_test_coverage_pct": 85,
+    "max_tests_failed": 0,
+    "min_author_success_rate": 0.85
+  },
+  "medium": {
+    "max_files_changed": 50,
+    "min_test_coverage_pct": 60,
+    "max_tests_failed": 1,
+    "min_author_success_rate": 0.7
+  },
+  "last_adjusted": "2026-07-12T15:00:14.605428",
+  "last_adjusted_reason": "Low-risk deployments failed 25% of the time (n=12, target <5%) -- tightened Low bar: min coverage 80%->85%, max files 20->15"
+}

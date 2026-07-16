@@ -1,0 +1,15 @@
+{
+  "_comment": "Mandatory organizational safety policies for app/policy_engine.py. These are deterministic overrides that take precedence over the ML model's statistical prediction -- editable without touching code. 'global' rules apply to every environment; environment-keyed sections (e.g. 'production') apply only when deployment.environment matches that key.",
+  "global": {
+    "maximum_failed_tests": 0,
+    "critical_file_coverage_threshold": 60
+  },
+  "production": {
+    "minimum_test_coverage": 50,
+    "friday_evening_escalation": true,
+    "friday_evening_start_hour": 18,
+    "critical_files_require_high": true
+  },
+  "development": {},
+  "staging": {}
+}

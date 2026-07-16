@@ -1,0 +1,14 @@
+# Secrets -- never commit real credentials
+.env
+
+# Generated data -- these are created by running the scripts, not hand-written
+data/deployment_history.csv
+data/audit_log.db
+data/audit_log.db-wal
+data/audit_log.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
