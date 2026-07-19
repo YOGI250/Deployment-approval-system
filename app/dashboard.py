@@ -28,7 +28,7 @@ import pandas as pd
 import altair as alt
 import requests
 import env_loader  # loads .env automatically
-from accuracy_metrics import compute_approval_accuracy
+from accuracy_metrics import compute_approval_accuracy, compute_daily_accuracy
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8001")
 API_KEY = os.environ.get("API_KEY", "")
@@ -116,6 +116,12 @@ def format_offline_accuracy(value):
     if isinstance(value, (int, float)):
         return f"{value * 100:.1f}%" if value <= 1 else f"{value:.1f}%"
     return "N/A"
+
+
+def format_ratio_pct(value):
+    """value is a 0-1 fraction (precision/recall/FPR/FNR) or None when its
+    denominator was 0 -- render "N/A" rather than fabricate 0%."""
+    return f"{value * 100:.0f}%" if value is not None else "N/A"
 
 
 # ---- Header ----
@@ -228,6 +234,12 @@ else:
     row4[3].metric("Verified Deployments", accuracy["total_verified"])
     st.caption("Calculated from verified deployment outcomes only.")
 
+    row5 = st.columns(4)
+    row5[0].metric("Precision", format_ratio_pct(accuracy["precision"]))
+    row5[1].metric("Recall", format_ratio_pct(accuracy["recall"]))
+    row5[2].metric("False Positive Rate", format_ratio_pct(accuracy["false_positive_rate"]))
+    row5[3].metric("False Negative Rate", format_ratio_pct(accuracy["false_negative_rate"]))
+
     if accuracy["total_verified"] > 0:
         accuracy_chart_df = pd.DataFrame({
             "Result": ["Correct", "Incorrect"],
@@ -251,6 +263,27 @@ else:
         st.altair_chart(accuracy_chart, width="stretch")
     else:
         st.caption("No verified deployments yet -- the accuracy chart will appear once outcomes are available.")
+
+    # ---- Confusion Matrix ----
+    st.subheader("Confusion Matrix")
+    confusion_df = pd.DataFrame(
+        [
+            [accuracy["true_positive"], accuracy["false_positive"]],
+            [accuracy["false_negative"], accuracy["true_negative"]],
+        ],
+        index=["Approve", "Reject"],
+        columns=["Actual: Success", "Actual: Failed"],
+    )
+    st.dataframe(confusion_df, width="stretch")
+
+    # ---- Accuracy Trend ----
+    st.subheader("Accuracy Trend")
+    daily_accuracy = compute_daily_accuracy(df.to_dict("records"))
+    if daily_accuracy:
+        trend_df = pd.DataFrame(daily_accuracy).set_index("date")
+        st.line_chart(trend_df["accuracy_pct"])
+    else:
+        st.caption("No verified deployments yet -- the accuracy trend will appear once daily outcomes are available.")
 
     st.divider()
 
