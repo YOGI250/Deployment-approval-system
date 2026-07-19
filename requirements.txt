@@ -7,3 +7,5 @@ python-dotenv
 pytest
 httpx
 scikit-learn
+sqlalchemy
+psycopg2-binary
