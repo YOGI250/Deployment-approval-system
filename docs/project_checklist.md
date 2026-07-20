@@ -2,14 +2,14 @@
 
 This originally listed pre-build planning tasks. Everything below has since
 been built and deployed; this now tracks actual completion status as of
-2026-07-20 (updated same day, evening), plus what's genuinely still open.
+2026-07-21, plus what's genuinely still open.
 
 ## Group 1 — Azure DevOps side
 - [x] Azure DevOps org/project + Git repo (lives in the separate pipeline repo)
 - [x] Pipeline (build + test) configured
-- [x] Environment with an "Invoke REST API" Check calling `POST /predict`
+- [x] "AI Risk Analysis" pipeline stage calling `POST /predict` via inline curl (not a native "Invoke REST API" Environment Check — corrected in docs, functionally equivalent)
 - [x] `POST /deployment-verification` wired up so the pipeline reports back what `GET /health` returned post-deploy
-- [ ] Confirm the pipeline actually branches on `risk_level`/`suggested_action` (auto-approve/wait/block), not just logs the response — verify per `docs/e2e_test_plan.md` section 3
+- [x] Confirm the pipeline actually branches on `risk_level`/`suggested_action` — **verified live for all three branches**: Low→`DeployProduction`/`production` (run `#20260720.7`), Medium→`DeployProductionManual`/`production-manual` with a real Azure DevOps Approval check requiring manual sign-off (run `#20260720.8`, audit row `id 99`), High→`RejectDeployment`/hard exit (rows `id 26`, `id 8`, `id 10`). Note: "Deploy Application" steps are intentional `echo` placeholders in every branch — this pipeline validates the risk gate, not a real app deployment, by design.
 
 ## Group 2 — The AI brain
 - [x] Deployment data schema defined (`DeploymentRequest` in `api.py`)
@@ -41,7 +41,7 @@ been built and deployed; this now tracks actual completion status as of
 - [x] `accuracy_metrics.py` — predicted-vs-actual accuracy computation
 - [x] `threshold_engine.py` — the recalibrated `risk_thresholds.json` now actually escalates decisions, not just Groq's explanation text
 - [x] Scheduled/automatic model retraining — `.github/workflows/scheduled-maintenance.yml`, runs weekly, verified live (real run retrained the model and committed it back to `main`)
-- [ ] **New gap found running the above**: the retrain job commits an updated `model.pkl` to `main`, but deploy to Azure App Service is still a manual step (VS Code extension) with no CI/CD watching this repo — so a Monday retrain doesn't reach production until someone manually redeploys *and restarts* the app. Confirmed via a live incident today: two manual redeploys silently had zero effect until an explicit App Service restart. Worth real CI/CD (GitHub Actions → Azure) once Azure CLI access is sorted (currently blocked by tenant security defaults on the account tested).
+- [ ] Retrain → production isn't fully automated — see "Remaining open items" below
 
 ## Recovery & post-deploy verification (beyond original scope)
 - [x] `recovery_manager.py` — classifies post-deploy health failures and recommends rollback, without attempting to touch Azure itself
@@ -55,5 +55,10 @@ been built and deployed; this now tracks actual completion status as of
 - [x] `docs/PROJECT_REPORT.md` — standalone submission writeup
 
 ## Final polish
-- [ ] Dry run the full demo end to end, including the Azure DevOps gate actually pausing/resolving live
-- [ ] Decide what to do with `data/audit_log.db` (old SQLite file — all rows already copied to Neon, now redundant)
+- [x] Dry run the full demo end to end, including the Azure DevOps gate actually pausing/resolving live — done 2026-07-21, all three branches (see Group 1)
+- [x] Decide what to do with `data/audit_log.db` — deleted (untracked SQLite leftover, all rows already in Neon)
+
+## Remaining open items (as of 2026-07-21)
+- [ ] Teams/Slack — not implemented; email was the chosen channel (brief allows any of the three), worth flagging to evaluators explicitly rather than leaving ambiguous
+- [ ] Real CI/CD from GitHub Actions to the Azure App Service — weekly model retrain commits to `main`, but shipping that to production is still a manual redeploy+restart; blocked on Azure CLI access (tenant security defaults blocked device-code login), explicitly deferred by the team for now
+- [ ] `architecture-diagram.html` predates the Groq/LLM explanation step, `recovery_manager.py`, and email notifications — worth a refresh if evaluators will view it

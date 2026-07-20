@@ -29,7 +29,7 @@ See `architecture-diagram.html` for the visual version. In short:
 
 ```
 Azure DevOps Pipeline
-      │  (Invoke REST API check)
+      │  (AI Risk Analysis stage: inline curl to /predict)
       ▼
 POST /predict  ──▶  feature_engineering.py
                           │
@@ -95,8 +95,17 @@ said — e.g. production deployments below a minimum coverage threshold, any
 deployment with more than the allowed number of failed tests, or a
 production Friday-evening deploy. These rules live in
 `data/deployment_policy.json`, editable without touching code. The Azure
-DevOps side calls this through a native "Invoke REST API" release-gate
-check.
+DevOps side calls this from an inline curl script in the pipeline's "AI Risk
+Analysis" stage, which then branches into three mutually-exclusive
+conditional deploy stages keyed on the returned decision -- `DeployProduction`
+(approve, environment `production`), `DeployProductionManual` (delay,
+environment `production-manual`, gated by a real Azure DevOps Approval check),
+and `RejectDeployment` (reject, hard `exit 1`). All three branches have been
+exercised live end-to-end in the pipeline repo, including a real human
+approval on the delay path (confirmed 2026-07-20/21 -- see `docs/e2e_test_plan.md`
+section 3). Deploy stages themselves are simulated (`echo` placeholders) --
+this pipeline validates the risk-gating logic, not a real target application
+deployment, by design.
 
 ### 3.4 Feedback Loop & Continuous Learning
 `POST /outcome` records what actually happened (success/fail,
@@ -105,9 +114,14 @@ uses that real data to recalibrate `data/risk_thresholds.json` — this has
 already run once for real: after observing a 25% real failure rate on
 predictions labeled Low risk, it tightened the Low-risk coverage bar from
 80% to 85%. `accuracy_metrics.py` computes predicted-vs-actual accuracy
-from the same data. Full scheduled retraining of the classifier is not yet
-automated — `train_model.py` works, but nothing currently triggers it on a
-cadence.
+from the same data. `threshold_engine.py` makes the recalibrated thresholds
+actually escalate a deployment's risk level, not just inform Groq's
+explanation text. Scheduled retraining is automated via
+`.github/workflows/scheduled-maintenance.yml` (weekly GitHub Actions run,
+verified live — a real run retrained the model and committed the update back
+to `main`); see `docs/SCHEDULED_MAINTENANCE.md` for the one known gap this
+doesn't close (shipping that retrain to the live Azure App Service is still
+a manual redeploy+restart, not automated).
 
 ### 3.5 Reporting & Dashboard
 A Streamlit dashboard reads live from `GET /history`: risk predictions per
@@ -139,7 +153,7 @@ details in `MIGRATION_NEON.md`.
 |---|---|---|
 | Architecture diagram | Done | `architecture-diagram.html` |
 | AI/ML model for risk prediction | Done | `app/ml/` (RandomForest) + Groq (explanation) |
-| Azure DevOps pipeline integration with approval gates | Done | "Invoke REST API" check in the pipeline repo, calling `/predict` and `/deployment-verification` |
+| Azure DevOps pipeline integration with approval gates | Done | Inline curl call to `/predict` and `/deployment-verification` in the pipeline repo, branching into 3 conditional deploy stages verified live (approve/delay/reject) |
 | Dashboard with risk analytics and post-deployment insights | Done | `app/dashboard.py` |
 | Notifications and communication workflow | Done (email) | `app/email_notify.py` |
 | Documentation including audit trail and explainability | Done | This document + `docs/requirement_traceability.md` + Neon audit log |
@@ -149,7 +163,7 @@ details in `MIGRATION_NEON.md`.
 | Criterion | Assessment |
 |---|---|
 | Accuracy of AI risk prediction | Measurable via `accuracy_metrics.py` against real recorded outcomes; the system has already demonstrably reacted to a measured accuracy gap (the Low-risk threshold tightening above) |
-| Correct integration with Azure DevOps approval gates | Working end-to-end in production; verify live gate behavior per `docs/e2e_test_plan.md` |
+| Correct integration with Azure DevOps approval gates | Verified live end-to-end for all three branches (approve/delay/reject), including a real human approval on the delay path — see `docs/e2e_test_plan.md` section 3 |
 | Reduction in failed deployments or incidents | The policy engine is the concrete mechanism (e.g., blocking under-tested production deploys before they ship); measurable over time via `incident_severity` on `/outcome` |
 | Explainability of AI decisions | Every decision stores a written reasoning string plus, when applicable, the specific named policy rule that fired |
 | Quality of dashboards and notifications | Live dashboard, real email delivery confirmed against a real inbox |
@@ -162,19 +176,23 @@ Being direct about what isn't finished, rather than glossing over it:
 - **Teams/Slack notifications** — not implemented; only email. The brief
   names email as an acceptable channel on its own, but if Teams/Slack was
   expected, this is a real gap.
-- **Scheduled model retraining** — the retraining script exists and works,
-  but nothing triggers it automatically yet; it's currently a manual step.
-- **One failing test** — `test_accuracy_metrics.py::test_result_has_exact_expected_keys`
-  fails because `compute_approval_accuracy()`'s return shape has grown
-  extra keys (precision, true/false positive rates) beyond what the test
-  currently expects. Not a functional bug, but needs a decision before
-  calling the accuracy-reporting piece fully polished.
-- **Azure DevOps gate branching** — this repo implements and has verified
-  the API side; whether the pipeline's release gate actually branches on
-  `risk_level`/`suggested_action` (vs. just logging the response) needs
-  confirming in that repo directly — see `docs/e2e_test_plan.md` section 3.
-- **Leftover local SQLite file** — `data/audit_log.db` (pre-migration data,
-  already copied into Neon) is now redundant and can be removed.
+- **Retrain reaching production isn't automated** — the weekly GitHub
+  Actions job retrains the model and commits it to `main`, but shipping
+  that to the live Azure App Service is still a manual redeploy, which
+  separately needs an explicit App Service restart to actually take effect
+  (confirmed via a live incident on 2026-07-20). Real CI/CD (GitHub Actions
+  → Azure) would close this; currently blocked on Azure CLI access (tenant
+  security defaults blocked a device-code login) — see
+  `docs/SCHEDULED_MAINTENANCE.md`.
+- **The demo pipeline doesn't deploy a real application** — its "Deploy
+  Application" steps are intentional `echo` placeholders. The pipeline's
+  actual, verified scope is the AI risk-gate and its three-way branch
+  (approve/delay/reject), not shipping a real target app. This is a
+  deliberate scope choice, not an oversight.
+- **Architecture diagram is out of date** — `architecture-diagram.html`
+  (kept outside this repo) is accurate for the core predict flow but
+  predates the Groq/LLM explanation step, `recovery_manager.py`, and the
+  email notification layer being added.
 
 ## 7. Tech stack
 

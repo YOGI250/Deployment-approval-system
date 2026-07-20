@@ -43,15 +43,28 @@ original version of this file for how the plan evolved).
   buried in LLM phrasing.
 
 ### "Integrates with Azure DevOps pipelines and approval gates"
-- **What was built**: An Azure DevOps Environment Check of type "Invoke
-  REST API", configured with an `X-API-Key` header, calling `POST /predict`
-  as a release gate. (This piece lives in the pipeline's own repo, not this
-  one -- see `docs/e2e_test_plan.md` for how the two are tested together.)
-  `POST /deployment-verification` closes the loop after deploy by recording
-  what the pipeline observed when it polled `GET /health`.
-- **Tech**: Azure DevOps native "Invoke REST API" check
-- **Why this way**: The documented, built-in Azure DevOps mechanism for
-  exactly this use case -- no custom Azure Function/Logic App needed.
+- **What was built**: An "AI Risk Analysis" pipeline stage that calls
+  `POST /predict` via an inline curl script (`X-API-Key` header, JSON built
+  with `json.dumps()` to avoid empty-var/422 bugs), then sets an output
+  variable the pipeline branches on into three mutually-exclusive
+  conditional deploy stages: `DeployProduction` (approve → environment
+  `production`), `DeployProductionManual` (delay → environment
+  `production-manual`, gated by a real Azure DevOps Approval check
+  requiring a human to sign off), and `RejectDeployment` (reject → hard
+  `exit 1`). (This piece lives in the pipeline's own repo, not this one --
+  see `docs/e2e_test_plan.md` for how the two are tested together.) All
+  three branches have been exercised live, including a real human approval
+  on the delay path. `POST /deployment-verification` closes the loop after
+  deploy by recording what the pipeline observed when it polled
+  `GET /health`.
+- **Tech**: Plain bash/curl inline script inside a normal Azure DevOps
+  pipeline stage (not a native "Invoke REST API" Environment Check), plus
+  a real Approval check on the `production-manual` environment
+- **Why this way**: A script step gave full control over payload
+  construction (git diff stats, coverage parsing, JSON building) that a
+  native Check's fixed UI doesn't expose; the human-approval requirement
+  itself is still enforced by a native Azure DevOps Approval check on the
+  `production-manual` environment, not by the script.
 
 ### "Provides audit trails and explainable AI decisions for compliance"
 - **What was built**: Every decision -- input features, ML risk level +
@@ -111,31 +124,40 @@ original version of this file for how the plan evolved).
   production minimum coverage, global max failed tests, critical-file
   coverage threshold, critical file + production failure, and Friday
   evening escalation.
-- **Tech**: Azure DevOps "Invoke REST API" check + `policy_engine.py` +
-  `decision_engine.py`
-- **Status**: Implemented. This is a meaningful upgrade over the original
-  plan -- organizational safety rules are enforced deterministically and
-  can't be talked around by a model's statistical judgment.
+- **Tech**: Azure DevOps pipeline stage (inline curl to `/predict`) +
+  `policy_engine.py` + `decision_engine.py` + a real Azure DevOps Approval
+  check on the `production-manual` environment
+- **Status**: Implemented and verified live end-to-end for all three
+  branches (approve/delay/reject) -- this is a meaningful upgrade over the
+  original plan, since organizational safety rules are enforced
+  deterministically and can't be talked around by a model's statistical
+  judgment.
 
 ### 2.4 Feedback Loop & Continuous Learning
 - **Collect post-deployment outcomes** → `POST /outcome`
   (`actual_outcome`, `incident_severity`), persisted against the original
   audit row.
 - **Retrain periodically** → `app/ml/train_model.py` retrains the
-  RandomForest from `data/deployment_history.csv`; not yet scheduled
-  automatically (would need a cron/pipeline trigger -- documented as the
-  natural next step, not faked as already running).
+  RandomForest from `data/deployment_history.csv`, scheduled weekly via
+  `.github/workflows/scheduled-maintenance.yml` (GitHub Actions cron +
+  `workflow_dispatch`), verified live -- a real run retrained the model
+  and committed the update back to `main`.
 - **Adjust risk thresholds dynamically** → `adjust_thresholds.py` reads
   real outcomes from the audit log and rewrites `data/risk_thresholds.json`
   with a logged reason (see `last_adjusted_reason` in that file for a real
   example: tightened the Low-risk coverage bar after a 25% real failure
-  rate was observed).
+  rate was observed). `threshold_engine.py` makes those thresholds
+  actually escalate a deployment's risk level (not just inform Groq's
+  explanation text) -- verified live, e.g. a 20-file change escalated
+  Low→Medium purely on the recalibrated file-count bar.
 - **Tech**: Neon Postgres audit table (`actual_outcome`,
   `incident_severity` columns), `adjust_thresholds.py`,
-  `accuracy_metrics.py`
-- **Status**: The data plumbing and threshold-adjustment mechanism are real
-  and runnable, not simulated. Full scheduled retraining is the one piece
-  still manual (see Known Gaps in `docs/PROJECT_REPORT.md`).
+  `threshold_engine.py`, `accuracy_metrics.py`,
+  `.github/workflows/scheduled-maintenance.yml`
+- **Status**: Fully implemented and verified live, with one known gap: the
+  weekly retrain commits an updated model to `main`, but shipping that to
+  the live Azure App Service is still a manual redeploy+restart, not
+  automated -- see `docs/SCHEDULED_MAINTENANCE.md`.
 
 ### 2.5 Reporting & Dashboard
 - **Risk predictions per commit/run, historical approval accuracy
@@ -185,7 +207,7 @@ original version of this file for how the plan evolved).
 |---|---|
 | Architecture diagram | `architecture-diagram.html` |
 | AI/ML model for risk prediction | Trained RandomForest classifier (`app/ml/`) + Groq for explanation only |
-| Azure DevOps pipeline integration with approval gates | "Invoke REST API" check calling `/predict`, plus `/deployment-verification` closing the post-deploy loop |
+| Azure DevOps pipeline integration with approval gates | Inline curl call to `/predict`, branching into 3 conditional deploy stages (verified live), plus `/deployment-verification` closing the post-deploy loop |
 | Dashboard with risk analytics and post-deployment insights | Streamlit dashboard (`app/dashboard.py`) reading from `/history` |
 | Notifications and communication workflow | Four-stage email notification flow (`email_notify.py`) |
 | Documentation including audit trail and explainability | This document + `docs/PROJECT_REPORT.md` + the Neon audit log + per-decision reasoning strings |
@@ -197,7 +219,7 @@ original version of this file for how the plan evolved).
 | Criterion | How the build satisfies it |
 |---|---|
 | Accuracy of AI risk prediction | `accuracy_metrics.py` computes predicted-vs-actual accuracy from real recorded outcomes; `adjust_thresholds.py` demonstrates the system actually reacting to that accuracy over time |
-| Correct integration with Azure DevOps approval gates | Live "Invoke REST API" check pausing/resolving based on `/predict`'s response; verify end-to-end per `docs/e2e_test_plan.md` |
+| Correct integration with Azure DevOps approval gates | Live pipeline branching on `/predict`'s response, verified end-to-end for all three decisions (approve/delay/reject) including a real human approval on the delay path -- see `docs/e2e_test_plan.md` section 3 |
 | Reduction in failed deployments or incidents | Policy engine's deterministic overrides (e.g. blocking production deploys under the coverage floor) are the concrete mechanism; `incident_severity` on `/outcome` lets this be measured over time |
 | Explainability of AI decisions | Every decision has a stored, human-readable Groq-written reasoning string plus, when applicable, an explicit `policy_reason` naming which organizational rule fired |
 | Quality of dashboards and notifications | Live Streamlit dashboard + real email delivery at each of the four notification points |

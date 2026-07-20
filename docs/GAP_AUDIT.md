@@ -1,11 +1,13 @@
 # Gap Audit — AI-Powered Deployment Approval Assistant
 
 Line-by-line audit of the evaluator brief (`Yogeshwaran.pdf`) against the
-actual code in this repo, verified by direct file reads on 2026-07-20 (not
-inferred from earlier docs). Each row cites the exact file/line proving the
-status. ✅ = fully implemented and verified. ⚠️ = partially implemented, or
-implemented but unconfirmed in a part of the system outside this repo. ❌ =
-not implemented.
+actual code in this repo, originally verified by direct file reads on
+2026-07-20, updated 2026-07-21 after closing most of what it found (live
+Azure DevOps gate verification, scheduled retraining, team success rate,
+threshold escalation, multi-pipeline concurrency test). Each row cites the
+exact file/line proving the status. ✅ = fully implemented and verified.
+⚠️ = partially implemented, or implemented but unconfirmed in a part of the
+system outside this repo. ❌ = not implemented.
 
 ---
 
@@ -16,7 +18,7 @@ not implemented.
 | 1 | Analyzes code changes, test results, deployment history | ✅ | `app/api.py:65-84` (`DeploymentRequest`), `app/feature_engineering.py`, `get_combined_history()` |
 | 2 | Predicts risk level: Low / Medium / High | ✅ | `app/ml/train_model.py:41-47`, served via `app/ml/predictor.py` |
 | 3 | Recommends approve / delay / reject | ✅ | `app/decision_engine.py` — deterministic `Low→approve, Medium→delay, High→reject` |
-| 4 | Integrates with Azure DevOps pipelines and approval gates | ⚠️ | API side real (`/predict`); gate mechanism itself (native Check vs. script step) needs confirming in the pipeline repo |
+| 4 | Integrates with Azure DevOps pipelines and approval gates | ✅ | Verified live 2026-07-21: pipeline branches into 3 conditional deploy stages on `/predict`'s decision. Low→`production` (run `#20260720.7`), Medium→`production-manual` with a real Approval check requiring manual sign-off (run `#20260720.8`, audit row `id 99`), High→hard `exit 1` (rows `id 26`, `id 8`, `id 10`). Mechanism is an inline curl script in a pipeline stage, not a native "Invoke REST API" Check — corrected in docs, functionally equivalent |
 | 5 | Audit trails + explainable AI decisions | ✅ | `app/audit_log.py` full lifecycle logging; `reasoning` populated every call |
 
 ## Scope — 1. Data Collection & Feature Engineering
@@ -30,11 +32,7 @@ not implemented.
 | 5 | Feature: commit complexity | ✅ | `files_changed` + `lines_changed` |
 | 6 | Feature: pipeline stage success ratio | ✅ | `app/feature_engineering.py:88` |
 | 7 | Feature: recent changes by same author | ✅ | `calculate_author_success_rate()` |
-| 8 | Feature: recent changes by same team | ❌ | `team` is captured as text/metadata (shown to Groq, used for dashboard filter) but **no `team_success_rate` feature is engineered or fed to the ML model** |
-
-Minor: `app/feature_engineering.py`'s own module docstring still says *"not
-wired into the live /predict flow yet"* — stale; confirmed live at
-`app/risk_scorer.py:339`.
+| 8 | Feature: recent changes by same team | ✅ | `calculate_team_success_rate()` in `app/feature_engineering.py`, wired into the feature vector alongside author success rate |
 
 ## Scope — 2. AI-Based Risk Assessment
 
@@ -51,7 +49,7 @@ wired into the live /predict flow yet"* — stale; confirmed live at
 | 1 | Auto-approve low-risk | ✅ (API side) | `decision_engine.py` |
 | 2 | Suggest additional checks / delay medium-risk | ✅ (API side) | `decision_engine.py` |
 | 3 | Block high-risk until manual review | ✅ (API side) | `decision_engine.py` |
-| 4 | Integrate with Azure DevOps approval gates so this actually branches pipeline behavior | ⚠️ | Same unconfirmed item as Problem Objective #4 |
+| 4 | Integrate with Azure DevOps approval gates so this actually branches pipeline behavior | ✅ | Same verified item as Problem Objective #4 |
 
 ## Scope — 4. Feedback Loop & Continuous Learning
 
@@ -59,8 +57,8 @@ wired into the live /predict flow yet"* — stale; confirmed live at
 |---|---|---|---|
 | 1 | Collect post-deployment outcomes: success/failure | ✅ | `POST /outcome` → `update_outcome()`, `app/api.py:259-280` |
 | 2 | Test coverage and production incidents | ✅ | `incident_severity` recorded per outcome |
-| 3 | Retrain AI model periodically | ⚠️ | `train_model.py` works but nothing schedules it — manual only |
-| 4 | Adjust risk thresholds dynamically based on pipeline performance | ⚠️ | `adjust_thresholds.py` real and already used once for real (tightened Low coverage bar 80%→85%), but its own comment (`app/adjust_thresholds.py:20`) says "run manually, or on a schedule" — no schedule exists |
+| 3 | Retrain AI model periodically | ✅ | `.github/workflows/scheduled-maintenance.yml` — weekly GitHub Actions cron + `workflow_dispatch`, verified live (real run retrained the model, committed `data/model.pkl` back to `main`). One residual gap: that commit doesn't auto-deploy to the live Azure App Service — still a manual redeploy+restart, see `docs/SCHEDULED_MAINTENANCE.md` |
+| 4 | Adjust risk thresholds dynamically based on pipeline performance | ✅ | `adjust_thresholds.py` runs in the same scheduled job; already used for real (tightened Low coverage bar 80%→85%). `threshold_engine.py` now makes the recalibrated thresholds actually escalate `risk_level` (not just inform Groq's explanation) — verified live, e.g. a 20-file change escalated Low→Medium purely on the file-count bar |
 
 ## Scope — 5. Reporting & Dashboard
 
@@ -94,7 +92,7 @@ wired into the live /predict flow yet"* — stale; confirmed live at
 |---|---|---|---|
 | 1 | Architecture diagram | ⚠️ | `architecture-diagram.html` exists (511 lines) and is accurate for the core flow (Developer → Pipeline → FastAPI → Feature Engineering → RandomForest → Policy Engine → Decision Engine → Health Check → Verification → Audit DB) — but **missing** the Groq/LLM explanation step, `recovery_manager.py`, and the email notification layer |
 | 2 | AI/ML model for deployment risk prediction | ✅ | RandomForest, confirmed live |
-| 3 | Azure DevOps pipeline integration with approval gates | ⚠️ | Same unconfirmed item as above |
+| 3 | Azure DevOps pipeline integration with approval gates | ✅ | Same verified item as above |
 | 4 | Dashboard with risk analytics and post-deployment insights | ✅ | Confirmed |
 | 5 | Notifications and communication workflow | ⚠️ | Email-only, content quality good |
 | 6 | Documentation including audit trail and explainability | ✅ | `docs/PROJECT_REPORT.md`, `docs/requirement_traceability.md`, `docs/e2e_test_plan.md`, `docs/project_checklist.md` + live audit trail |
@@ -104,29 +102,25 @@ wired into the live /predict flow yet"* — stale; confirmed live at
 | # | Criterion | Assessment |
 |---|---|---|
 | 1 | Accuracy of AI risk prediction | Measurable (`accuracy_metrics.py`, dashboard confusion matrix), but only as strong as real `/outcome` volume — currently thin, mostly synthetic history |
-| 2 | Correct integration with Azure DevOps approval gates | **Weakest point overall** — this is a named deliverable *and* evaluation criterion, and it's the one thing not directly verified in this repo |
+| 2 | Correct integration with Azure DevOps approval gates | **Now the strongest-verified point** — this was a named deliverable *and* evaluation criterion and the one thing not directly verified from this repo; as of 2026-07-21 all three branches (approve/delay/reject) have run live, including a real human approval on the delay path |
 | 3 | Reduction in failed deployments/incidents | No before/after baseline measured yet — policy engine is the mechanism, but the *reduction* claim itself isn't quantified over time |
 | 4 | Explainability of AI decisions | Strong — real reasoning text grounded in real threshold numbers, plus named policy rules when triggered |
 | 5 | Quality of dashboards and notifications | Dashboard exceeds the ask (precision/recall/confusion matrix); notifications solid but single-channel |
-| 6 | Practicality/scalability across multiple pipelines | Structurally supported (`team`/`environment` fields, Neon handles concurrency) but never demonstrated live with 2+ pipelines running concurrently |
+| 6 | Practicality/scalability across multiple pipelines | `tests/test_multi_pipeline.py` fires real concurrent `/predict` requests across distinct team/environment/deployment_id combinations (a thread pool, real HTTP-shaped calls) and confirms no cross-contamination or lost writes in `/history`. Demonstrated at the API/DB layer; not literally 2 live Azure DevOps pipelines running simultaneously, but that's the same code path either way |
 
 ---
 
-## Consolidated priority gap list
+## Consolidated priority gap list (updated 2026-07-21)
 
-Ranked by how much an evaluator is likely to weight them (ties to a named
-deliverable or evaluation criterion first):
+Items 1, 4, 5, 6, and 8 from the original 2026-07-20 audit are now closed —
+see the evidence cited above. What's genuinely still open:
 
-1. **Azure DevOps gate mechanism unconfirmed** — is it a native blocking Check, or just a script step logging the response? Verify directly in the pipeline repo. *(Named deliverable + evaluation criterion — highest priority)*
-2. **"Reduction in failed deployments" not actually measured** — no before/after baseline exists. *(Named evaluation criterion)*
-3. **No Teams/Slack notifications** — email only. *(Named deliverable, technically satisfied by "or" but worth flagging)*
-4. **No automated model retraining schedule** — manual only.
-5. **No automated threshold-adjustment schedule** — manual only, despite brief's "dynamically."
-6. **Multi-pipeline scalability never demonstrated live** — structurally ready, not proven.
-7. **Architecture diagram missing 3 real components** (Groq/LLM, recovery manager, email notifications).
-8. **Team-level success-rate feature not engineered** — author-only.
-9. Stale docstring in `feature_engineering.py` — cosmetic.
+1. **"Reduction in failed deployments" not actually measured** — no before/after baseline exists. *(Named evaluation criterion)*
+2. **No Teams/Slack notifications** — email only. *(Named deliverable, technically satisfied by "or" but worth flagging)*
+3. **Retrain doesn't reach production automatically** — the weekly job retrains and commits to `main`, but shipping to the live Azure App Service is still a manual redeploy+restart; blocked on Azure CLI access (tenant security defaults), deferred deliberately for now.
+4. **Architecture diagram missing 3 real components** (Groq/LLM, recovery manager, email notifications) — cosmetic/documentation only.
 
-Items 1-3 are the ones most likely to cost points directly against named
-evaluation criteria. Items 4-6 are real but lower-stakes since the brief's
-wording ("or," "periodically") gives some latitude. Items 7-9 are polish.
+Item 1 is the one most likely to cost points against a named evaluation
+criterion if raised. Items 2-3 have some latitude in the brief's own wording
+("or," and CI/CD to Azure was an explicit scope decision, not an oversight).
+Item 4 is polish.

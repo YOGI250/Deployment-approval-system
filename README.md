@@ -4,7 +4,8 @@ An AI-assisted system that scores the risk of a deployment (Low/Medium/High)
 with a trained RandomForest classifier, explains its reasoning with an LLM,
 applies deterministic organizational safety policies on top, and recommends
 approve/delay/reject -- integrated with Azure DevOps approval gates via an
-"Invoke REST API" check.
+inline curl call to `/predict` in the pipeline's "AI Risk Analysis" stage,
+branching into three conditional deploy stages (approve/delay/reject).
 
 See `docs/requirement_traceability.md` for how every part of this maps back
 to the original project brief, and `docs/PROJECT_REPORT.md` for the full
@@ -133,16 +134,11 @@ pytest tests/ -v
 1. Add `API_KEY` (any long random string) to your App Service's Environment
    variables in the Azure Portal, same place as `GROQ_API_KEY` etc.
 2. Redeploy the updated code (VS Code Azure extension -> Deploy to Web App)
-3. Update the Azure DevOps "Invoke REST API" check's **Headers** field to
-   include the same key:
-   ```json
-   {
-     "Content-Type": "application/json",
-     "X-API-Key": "the-same-value-you-put-in-API_KEY"
-   }
-   ```
-   Without this, the check will now get a 401 error, since the API is no
-   longer open to unauthenticated callers.
+3. Update the `API_KEY` variable in the pipeline repo's `risk-assistant-secrets`
+   variable group (Azure DevOps -> Pipelines -> Library) to the same value --
+   the `AI Risk Analysis` stage's curl call sends it as the `X-API-Key`
+   header. Without this, the call will now get a 401 error, since the API is
+   no longer open to unauthenticated callers.
 
 
 # Deployment-approval-system

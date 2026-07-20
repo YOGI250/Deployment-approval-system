@@ -51,7 +51,7 @@ call: `X-API-Key: <API_KEY from .env>`.
 | Policy override — critical file coverage | Critical file + coverage under `critical_file_coverage_threshold` (60) | `"rule_3_global_critical_file_coverage"` triggered |
 | Policy override — critical file + prod failure | production + critical file + `failed_at_stage` set | `"rule_4_production_critical_file_with_failures"` triggered |
 | Friday evening escalation | production, `day_of_week: "Friday"`, an evening `hour` | `"rule_5_production_friday_evening_escalation"` triggered, risk escalated one level (`_escalate_one_level`) |
-| **Azure DevOps gate itself** | *(in the other repo)* — trigger the actual pipeline run and watch the approval gate | Gate auto-approves on Low, waits/flags on Medium, blocks on High — confirm the pipeline YAML actually calls `/predict` and branches on `risk_level`/`suggested_action`, not just logs it |
+| **Azure DevOps gate itself** | *(in the other repo)* — trigger the actual pipeline run and watch the approval gate | **Verified live, all three branches.** Low → `DeployProduction`/`production`, auto-proceeds (confirmed run `#20260720.7`). Medium → `DeployProductionManual`/`production-manual`, pauses for a real Azure DevOps Approval check and only proceeds once approved (confirmed run `#20260720.8`, commit `387e644` in the pipeline repo — 20 files changed pushed it past the Low tier's file-count bar, `threshold_engine` escalated Low→Medium, decision `delay`, approved manually, deploy stage ran, `/deployment-verification` reported healthy, `/outcome` recorded `success` — audit row `id 99`, `deployment_id "65"`). High → `RejectDeployment`, hard `exit 1` (confirmed earlier, e.g. audit rows `id 26`, `id 8`, `id 10`). Note: the "Deploy Application" step in every branch is a simulated `echo` placeholder by design — this pipeline validates risk-gating/branching, not a real application deployment. |
 
 ## 4. Feedback loop & continuous learning
 
@@ -114,6 +114,9 @@ call: `X-API-Key: <API_KEY from .env>`.
 | — | Calling `/deployment-verification` ~20s post-deploy per the DEV-009 comment in `api.py` |
 | — | Whatever mechanism blocks the release for High risk (manual approval task, gate check, etc.) |
 
-That last row is the one to verify most carefully — it's the actual
+That last row is the one that mattered most to verify — it's the actual
 "integration with Azure DevOps approval gates" the evaluators are scoring,
-and it lives entirely outside this repo.
+and it lives entirely outside this repo. As of 2026-07-21 it's fully
+verified: all three decision branches have run for real against the live
+pipeline, including a genuine human approval gate on the delay path (not
+just a script that logs the decision).
