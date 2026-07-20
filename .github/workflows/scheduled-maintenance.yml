@@ -1,0 +1,60 @@
+# Weekly "learn from real outcomes" job: retrains the RandomForest model
+# and recalibrates data/risk_thresholds.json from real audit-log
+# outcomes, then commits the results back so the next deploy picks them
+# up. Runs app/scheduled_maintenance.py, which wraps train_model.py and
+# adjust_thresholds.py -- see docs/SCHEDULED_MAINTENANCE.md.
+#
+# Lives here (GitHub Actions) rather than in the Azure DevOps demo
+# pipeline (deployment-approval-demo) because this repo -- which holds
+# train_model.py, adjust_thresholds.py, and data/model.pkl -- is what's
+# actually deployed to the Azure Web App, via App Service's own git
+# deploy. The demo repo only triggers the per-deployment risk-check
+# pipeline and doesn't contain this code at all.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL  - same Neon Postgres connection string used by the app
+#   GROQ_API_KEY  - only needed because risk_scorer.py (imported by
+#                   adjust_thresholds.py) constructs a Groq client at
+#                   import time; Groq is never actually called here.
+
+name: Scheduled Maintenance
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # every Monday at 03:00 UTC
+  workflow_dispatch: {}    # allows a manual run from the Actions tab
+
+permissions:
+  contents: write   # needed to commit the updated model/thresholds back
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scheduled maintenance
+        working-directory: app
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python3 scheduled_maintenance.py
+
+      - name: Commit updated model/thresholds if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/risk_thresholds.json data/model.pkl
+          if ! git diff --cached --quiet; then
+            git commit -m "Scheduled maintenance: retrain model + adjust thresholds [skip ci]"
+            git push
+          else
+            echo "No changes to commit -- thresholds and model are unchanged."
+          fi
