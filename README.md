@@ -1,27 +1,43 @@
 # AI-Powered Deployment Approval Assistant
 
-An AI-assisted system that scores the risk of a deployment (Low/Medium/High),
-explains its reasoning, and recommends approve/delay/reject -- built to
-integrate with Azure DevOps approval gates.
+An AI-assisted system that scores the risk of a deployment (Low/Medium/High)
+with a trained RandomForest classifier, explains its reasoning with an LLM,
+applies deterministic organizational safety policies on top, and recommends
+approve/delay/reject -- integrated with Azure DevOps approval gates via an
+"Invoke REST API" check.
 
 See `docs/requirement_traceability.md` for how every part of this maps back
-to the original project brief.
+to the original project brief, and `docs/PROJECT_REPORT.md` for the full
+submission writeup.
 
 ## Project structure
 
 ```
 deployment-approval-assistant/
-├── app/                          All working code
+├── app/                              All working code
 │   ├── generate_deployment_history.py   Creates synthetic past-deployment data
-│   ├── risk_scorer.py                   Calls Groq (LLM) to judge risk
+│   ├── feature_engineering.py           Builds the feature vector fed to the model
+│   ├── ml/
+│   │   ├── train_model.py                   Trains the RandomForest classifier
+│   │   ├── predictor.py                      Loads data/model.pkl, predicts risk_level + confidence
+│   │   └── model_utils.py                    Model save/load, feature-vector helpers
+│   ├── risk_scorer.py                   Orchestrates: features -> ML model -> policy_engine -> Groq (explanation only)
+│   ├── policy_engine.py                 Deterministic organizational rules that can override the ML prediction
+│   ├── decision_engine.py               Maps risk_level -> approve/delay/reject
+│   ├── recovery_manager.py              Classifies post-deploy health failures, recommends rollback
+│   ├── model_info.py                    Real, verifiable facts about the deployed model (for the dashboard)
+│   ├── adjust_thresholds.py             Recalibrates data/risk_thresholds.json from real outcomes
+│   ├── accuracy_metrics.py              Predicted-vs-actual accuracy computation
 │   ├── api.py                           FastAPI service (the main entry point)
-│   ├── audit_log.py                     SQLite database logging
+│   ├── database.py / models.py          SQLAlchemy engine + AuditLog ORM model (Neon Postgres)
+│   ├── audit_log.py                     Audit trail read/write functions (Neon Postgres, was SQLite pre-migration)
 │   ├── email_notify.py                  Gmail notifications
 │   └── dashboard.py                     Streamlit dashboard
-├── data/                          Generated files (not hand-written, gitignored)
-├── docs/                          Planning documents
-├── requirements.txt                One-command dependency install
-├── .env.example                    Template for required environment variables
+├── data/                              Generated files (not hand-written, gitignored)
+├── docs/                              Planning + submission documents
+├── tests/                             pytest suite
+├── requirements.txt                    One-command dependency install
+├── .env.example                        Template for required environment variables
 └── .gitignore
 ```
 
@@ -71,26 +87,33 @@ directly, so they need to run from inside that folder.
 
 ## What each endpoint does
 
-- `POST /predict` -- send deployment details, get back a risk decision
+- `POST /predict` -- send deployment details, get back a risk decision (ML risk level + confidence, policy overrides, LLM reasoning, suggested action)
 - `GET /history` -- see every logged decision
 - `POST /outcome` -- record what actually happened after a deployment, closing the feedback loop
+- `POST /deployment-verification` -- pipeline reports the post-deploy `/health` result; persisted against the matching audit row and run through `recovery_manager` for a rollback recommendation
+- `GET /health` -- liveness + DB connectivity check, also what the pipeline polls ~20s after deploy
+- `GET /model-info` -- real facts about the currently loaded model (name, version, feature count, last-updated)
+- `GET /` -- basic root health check (unauthenticated)
 
 ## Production hardening (v2)
 
 Beyond the core demo, this version adds real production-readiness features:
 
-- **API authentication** -- `/predict`, `/outcome`, and `/history` require an
-  `X-API-Key` header matching `API_KEY` in `.env`. Unset = unauthenticated
-  with a loud warning logged (fine for local testing, never for a real deploy).
+- **API authentication** -- `/predict`, `/outcome`, `/history`, and
+  `/deployment-verification` require an `X-API-Key` header matching `API_KEY`
+  in `.env`. Unset = unauthenticated with a loud warning logged (fine for
+  local testing, never for a real deploy).
 - **File criticality detection** -- if you send a `changed_files` list (real
   file paths), deployments touching payments/auth/config/security files are
   automatically treated as higher risk, regardless of file count.
 - **Historical grounding (RAG)** -- the AI is shown the 3 most similar past
   deployments (same author, similar size) and their real outcomes before
   making its judgment, instead of reasoning in a vacuum every time.
-- **Resilient AI calls** -- if Groq is slow or unreachable, the system retries
-  with backoff, then fails SAFE (Medium risk, flagged for manual review)
-  instead of crashing the whole deployment pipeline.
+- **Resilient AI calls** -- the risk *level* comes from the trained RandomForest
+  model, not Groq, so an LLM outage never changes a risk decision. If Groq is
+  slow or unreachable, the system retries with backoff, then falls back to a
+  generic reasoning string (`degraded: true` in the response) instead of
+  crashing the whole deployment pipeline.
 - **Prompt versioning** -- every audit log row records which prompt/logic
   version made that decision (`prompt_version` column) -- a real compliance
   requirement for explaining decisions after the fact.
