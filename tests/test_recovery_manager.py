@@ -5,8 +5,8 @@ DEV-010: verifies the Enterprise Deployment Recovery Framework --
 recovery_manager.evaluate_recovery() directly, its persistence into the
 audit log, its integration into POST /deployment-verification, the
 recovery-required email, and that none of this disturbs existing
-behavior. Every DB-touching test points audit_log at a throwaway sqlite
-file via the `isolated_db` fixture, same pattern as
+behavior. Every DB-touching test points audit_log at a throwaway
+sqlite-backed engine via the `isolated_db` fixture, same pattern as
 test_deployment_verification.py.
 """
 
@@ -20,6 +20,8 @@ os.environ["API_KEY"] = "test-secret-123"
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import audit_log
 import recovery_manager
@@ -60,7 +62,9 @@ SAMPLE_RESULT = {
 @pytest.fixture
 def isolated_db(monkeypatch, tmp_path):
     db_path = str(tmp_path / "test_audit_log.db")
-    monkeypatch.setattr(audit_log, "DB_FILE", db_path)
+    test_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(audit_log, "engine", test_engine)
+    monkeypatch.setattr(audit_log, "SessionLocal", sessionmaker(bind=test_engine, autoflush=False, autocommit=False))
     audit_log.init_db()
     return db_path
 

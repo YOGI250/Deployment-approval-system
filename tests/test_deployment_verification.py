@@ -3,9 +3,10 @@ test_deployment_verification.py
 
 DEV-009: verifies GET /health and POST /deployment-verification --
 enterprise deployment verification. Every test points audit_log at a
-throwaway sqlite file via the `isolated_db` fixture (same pattern as
-test_audit_log.py), so nothing here touches the real data/audit_log.db,
-and none of it requires a live Groq call or a real deployed service.
+throwaway sqlite-backed engine via the `isolated_db` fixture (same
+pattern as test_audit_log.py), so nothing here touches the real Neon
+database, and none of it requires a live Groq call or a real deployed
+service.
 """
 
 import os
@@ -18,6 +19,8 @@ os.environ["API_KEY"] = "test-secret-123"
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import audit_log
 import api
@@ -55,9 +58,11 @@ SAMPLE_RESULT = {
 
 @pytest.fixture
 def isolated_db(monkeypatch, tmp_path):
-    """Points audit_log (and api.py's imported references to it) at a fresh sqlite file for one test."""
+    """Points audit_log (and api.py's imported references to it) at a fresh sqlite-backed engine for one test."""
     db_path = str(tmp_path / "test_audit_log.db")
-    monkeypatch.setattr(audit_log, "DB_FILE", db_path)
+    test_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(audit_log, "engine", test_engine)
+    monkeypatch.setattr(audit_log, "SessionLocal", sessionmaker(bind=test_engine, autoflush=False, autocommit=False))
     audit_log.init_db()
     return db_path
 
