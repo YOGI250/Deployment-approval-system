@@ -26,10 +26,8 @@ That pipeline repo is a separate, minimal "sample project" used only to
 trigger `/predict` on the deployed AI service -- it doesn't contain
 `train_model.py`, `adjust_thresholds.py`, or `data/model.pkl` at all.
 This repo (`deployment-approval-assistant`, on GitHub) is what holds
-that code and *is* the thing deployed to the Azure Web App, via App
-Service's own git-based deploy (see `.deployment`) -- so GitHub Actions
-running directly on it, with no cross-repo checkout, is the simplest
-correct place for this job.
+that code, so GitHub Actions running directly on it, with no cross-repo
+checkout, is the simplest correct place for this job.
 
 The workflow checks out this repo, installs `requirements.txt`,
 regenerates `data/deployment_history.csv` (gitignored, seeded with
@@ -40,10 +38,20 @@ then commits `data/model.pkl` and
 job's own `GITHUB_TOKEN`, via `permissions: contents: write` --
 `skip ci` in the commit message to avoid any push-triggered workflow
 loop). Committing them is the simplest way to make an updated model
-"the one that's live" without a separate model registry -- the next
-push to `main` triggers App Service's own deploy and picks up whatever
-was just committed. If a real model registry/artifact store exists
-later, swap that step for a registry push instead of a git commit.
+"the one that's live" without a separate model registry.
+
+**Known gap, confirmed live on 2026-07-20**: committing to `main` does
+*not* by itself deploy to the Azure Web App. Deploy there is currently a
+manual step (VS Code Azure extension), and that same day a redeploy was
+also found to silently not take effect until the App Service was
+explicitly restarted from the Portal. So right now, a Monday retrain
+sits on `main` until someone notices, manually redeploys, *and*
+restarts the app -- the automation covers retrain+recalibrate, not
+retrain+recalibrate+ship. Real CI/CD (GitHub Actions -> Azure, e.g.
+`azure/webapps-deploy`) would close this gap; blocked for now on Azure
+CLI access (tenant security defaults blocked a device-code login).
+If a real model registry/artifact store exists later, that's also a
+reasonable alternative to swap the commit-back step for.
 
 Requires two repo secrets (Settings -> Secrets and variables -> Actions):
 - `DATABASE_URL` -- same Neon Postgres connection string the app itself uses

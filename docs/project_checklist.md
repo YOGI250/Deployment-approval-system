@@ -2,7 +2,7 @@
 
 This originally listed pre-build planning tasks. Everything below has since
 been built and deployed; this now tracks actual completion status as of
-2026-07-20, plus what's genuinely still open.
+2026-07-20 (updated same day, evening), plus what's genuinely still open.
 
 ## Group 1 — Azure DevOps side
 - [x] Azure DevOps org/project + Git repo (lives in the separate pipeline repo)
@@ -39,15 +39,17 @@ been built and deployed; this now tracks actual completion status as of
 - [x] Real post-deployment outcomes logged via `/outcome` (not simulated)
 - [x] `adjust_thresholds.py` — recalibrates `data/risk_thresholds.json` from real recorded outcomes
 - [x] `accuracy_metrics.py` — predicted-vs-actual accuracy computation
-- [ ] Scheduled/automatic model retraining — `train_model.py` exists and works, but nothing currently triggers it on a schedule; still a manual step
+- [x] `threshold_engine.py` — the recalibrated `risk_thresholds.json` now actually escalates decisions, not just Groq's explanation text
+- [x] Scheduled/automatic model retraining — `.github/workflows/scheduled-maintenance.yml`, runs weekly, verified live (real run retrained the model and committed it back to `main`)
+- [ ] **New gap found running the above**: the retrain job commits an updated `model.pkl` to `main`, but deploy to Azure App Service is still a manual step (VS Code extension) with no CI/CD watching this repo — so a Monday retrain doesn't reach production until someone manually redeploys *and restarts* the app. Confirmed via a live incident today: two manual redeploys silently had zero effect until an explicit App Service restart. Worth real CI/CD (GitHub Actions → Azure) once Azure CLI access is sorted (currently blocked by tenant security defaults on the account tested).
 
 ## Recovery & post-deploy verification (beyond original scope)
 - [x] `recovery_manager.py` — classifies post-deploy health failures and recommends rollback, without attempting to touch Azure itself
 - [x] Persisted to the audit row alongside the original decision (`recovery_status`, `rollback_recommended`, `recovery_reason`)
 
 ## Testing & documentation
-- [x] pytest suite covering audit log, deployment verification, recovery manager, API auth
-- [ ] `test_accuracy_metrics.py::test_result_has_exact_expected_keys` currently failing — `compute_approval_accuracy`'s return shape has grown extra keys beyond what the test expects; needs a decision (update the test, or trim the function)
+- [x] pytest suite covering audit log, deployment verification, recovery manager, API auth, threshold engine, multi-pipeline concurrency (160 tests, all passing)
+- [x] `test_accuracy_metrics.py::test_result_has_exact_expected_keys` — fixed, test updated to match `compute_approval_accuracy`'s real (precision/recall/confusion-matrix) return shape
 - [x] `docs/requirement_traceability.md` — updated to reflect the shipped build, not the original plan
 - [x] `docs/e2e_test_plan.md` — end-to-end test matrix mapped to evaluator criteria
 - [x] `docs/PROJECT_REPORT.md` — standalone submission writeup

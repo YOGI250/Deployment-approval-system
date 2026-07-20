@@ -1,15 +1,19 @@
 # Weekly "learn from real outcomes" job: retrains the RandomForest model
 # and recalibrates data/risk_thresholds.json from real audit-log
-# outcomes, then commits the results back so the next deploy picks them
-# up. Runs app/scheduled_maintenance.py, which wraps train_model.py and
+# outcomes, then commits the results back to main. Runs
+# app/scheduled_maintenance.py, which wraps train_model.py and
 # adjust_thresholds.py -- see docs/SCHEDULED_MAINTENANCE.md.
 #
 # Lives here (GitHub Actions) rather than in the Azure DevOps demo
 # pipeline (deployment-approval-demo) because this repo -- which holds
-# train_model.py, adjust_thresholds.py, and data/model.pkl -- is what's
-# actually deployed to the Azure Web App, via App Service's own git
-# deploy. The demo repo only triggers the per-deployment risk-check
-# pipeline and doesn't contain this code at all.
+# train_model.py, adjust_thresholds.py, and data/model.pkl -- is what
+# holds that code; the demo repo only triggers the per-deployment
+# risk-check pipeline and doesn't contain any of this.
+#
+# NOTE: committing to main does NOT deploy to Azure -- that's currently
+# a manual step (VS Code extension) that also needs an explicit App
+# Service restart to take effect. See "Known gap" in
+# docs/SCHEDULED_MAINTENANCE.md.
 #
 # Requires two repo secrets (Settings -> Secrets and variables -> Actions):
 #   DATABASE_URL  - same Neon Postgres connection string used by the app
