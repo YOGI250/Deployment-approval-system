@@ -31,8 +31,11 @@ Service's own git-based deploy (see `.deployment`) -- so GitHub Actions
 running directly on it, with no cross-repo checkout, is the simplest
 correct place for this job.
 
-The workflow checks out this repo, installs `requirements.txt`, runs
-`app/scheduled_maintenance.py`, then commits `data/model.pkl` and
+The workflow checks out this repo, installs `requirements.txt`,
+regenerates `data/deployment_history.csv` (gitignored, seeded with
+`random.seed(42)` so it's identical every run -- `train_model.py` blends
+real audit-log outcomes on top of it), runs `app/scheduled_maintenance.py`,
+then commits `data/model.pkl` and
 `data/risk_thresholds.json` back to `main` if either changed (using the
 job's own `GITHUB_TOKEN`, via `permissions: contents: write` --
 `skip ci` in the commit message to avoid any push-triggered workflow

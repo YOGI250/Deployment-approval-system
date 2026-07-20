@@ -40,6 +40,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Regenerate synthetic deployment history baseline
+        # data/deployment_history.csv is gitignored (generated, not
+        # hand-written) so it isn't in the checkout. It's seeded
+        # (random.seed(42)) so this always reproduces the same 500-row
+        # baseline that train_model.py blends real outcomes on top of.
+        working-directory: app
+        run: python3 generate_deployment_history.py
+
       - name: Run scheduled maintenance
         working-directory: app
         env:
