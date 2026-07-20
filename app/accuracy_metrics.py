@@ -170,3 +170,70 @@ def compute_daily_accuracy(rows: Iterable[dict]) -> list:
         {"date": date, "accuracy_pct": correct / total * 100}
         for date, (correct, total) in sorted(daily_counts.items())
     ]
+
+
+def compute_baseline_failure_rate(baseline_rows: Iterable[dict]) -> Optional[float]:
+    """
+    Failure rate in data/deployment_history.csv -- the 500-row synthetic
+    "past company history" every deployment in this repo shipped with, all
+    of it unfiltered by this tool (it predates the tool existing). Its
+    "outcome" column uses "success"/"fail" (not the audit log's
+    "deployment_status", which uses "success"/"failed").
+
+    Returns None only if the input has no rows with a recognized outcome
+    (i.e. someone points this at the wrong file) -- the real 500-row file
+    always yields a real number, never a placeholder.
+    """
+    outcomes = [r.get("outcome") for r in baseline_rows if r.get("outcome") in ("success", "fail")]
+    if not outcomes:
+        return None
+    return sum(1 for o in outcomes if o == "fail") / len(outcomes)
+
+
+def compute_failure_rate_impact(audit_rows: Iterable[dict], baseline_rows: Iterable[dict]) -> dict:
+    """
+    Answers the brief's "reduction in failed deployments" evaluation
+    criterion honestly, without waiting months for volume: compares the
+    pre-tool baseline failure rate (deployment_history.csv, zero AI
+    gating) against the real failure rate among deployments THIS TOOL
+    approved that have since been verified (decision == "approve" and a
+    real deployment_status from DEV-009's /deployment-verification).
+
+    Deliberately excludes delayed/rejected deployments from the "actual"
+    side -- this metric asks "of what the AI let through, how often did it
+    actually break", not "how often did anything break", since delay/
+    reject outcomes are governed by the Approval Accuracy metric instead.
+
+    Returns:
+        {
+            "baseline_fail_rate": float | None,  # from the 500-row starter history
+            "actual_fail_rate": float | None,    # None until >=1 approved deployment is verified
+            "sample_size": int,                  # verified, approved deployments counted
+            "reduction_pct": float | None,       # None until actual_fail_rate is known
+        }
+
+    reduction_pct is positive when the tool is doing better than baseline,
+    negative when it's doing worse -- never fabricated, never clamped.
+    """
+    baseline_fail_rate = compute_baseline_failure_rate(baseline_rows)
+
+    approved_verified = [
+        row for row in audit_rows
+        if row.get("decision") == "approve" and row.get("deployment_status") in VERIFIED_STATUSES
+    ]
+    sample_size = len(approved_verified)
+    actual_fail_rate: Optional[float] = (
+        sum(1 for row in approved_verified if row["deployment_status"] == "failed") / sample_size
+        if sample_size > 0 else None
+    )
+
+    reduction_pct: Optional[float] = None
+    if baseline_fail_rate is not None and actual_fail_rate is not None and baseline_fail_rate > 0:
+        reduction_pct = (baseline_fail_rate - actual_fail_rate) / baseline_fail_rate * 100
+
+    return {
+        "baseline_fail_rate": baseline_fail_rate,
+        "actual_fail_rate": actual_fail_rate,
+        "sample_size": sample_size,
+        "reduction_pct": reduction_pct,
+    }

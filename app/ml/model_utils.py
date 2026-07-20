@@ -28,6 +28,7 @@ FEATURE_ORDER = [
     "test_coverage_pct",
     "tests_failed",
     "author_recent_success_rate",
+    "team_recent_success_rate",
     "has_critical_files",
     "is_risky_timing",
     "is_production",

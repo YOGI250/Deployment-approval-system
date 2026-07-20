@@ -126,7 +126,9 @@ class TestRealModelArtifact:
         assert result["model_name"] == "RandomForest"
         assert result["model_version"] == "1.0"
         assert result["prompt_version"]  # reused from risk_scorer, non-empty
-        assert result["number_of_features"] == 9
+        # 10 features since team_recent_success_rate was added alongside
+        # author_recent_success_rate -- update this if FEATURE_ORDER changes again.
+        assert result["number_of_features"] == 10
         # No metadata file ships in this repo -- both must be honest N/A.
         assert result["training_dataset_size"] == "N/A"
         assert result["offline_validation_accuracy"] == "N/A"
