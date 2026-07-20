@@ -51,6 +51,10 @@ def policy_label(overridden):
     return "🟠 Override Applied" if bool(overridden) else "🟢 ML Prediction"
 
 
+def threshold_label(overridden):
+    return "🟠 Escalated" if bool(overridden) else "🟢 Within Bar"
+
+
 DEPLOYMENT_STATUS_LABELS = {"success": "🟢 Verified Healthy", "failed": "🔴 Verification Failed"}
 
 
@@ -94,6 +98,20 @@ def load_model_info():
     try:
         response = requests.get(
             f"{API_BASE_URL}/model-info",
+            headers={"X-API-Key": API_KEY},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException:
+        return None
+
+
+@st.cache_data(ttl=30)
+def load_failure_rate_impact():
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/failure-rate-impact",
             headers={"X-API-Key": API_KEY},
             timeout=10,
         )
@@ -165,6 +183,7 @@ else:
     selected_risks = st.sidebar.multiselect("Risk Level", risk_options, default=risk_options)
     selected_decisions = st.sidebar.multiselect("Decision", decision_options, default=decision_options)
     policy_choice = st.sidebar.selectbox("Policy Override", ["All", "Override Applied", "ML Prediction"])
+    threshold_choice = st.sidebar.selectbox("Threshold Calibration", ["All", "Escalated", "Within Bar"])
 
     filtered_df = df.copy()
     if selected_risks:
@@ -176,6 +195,11 @@ else:
             filtered_df = filtered_df[filtered_df["policy_override"] == 1]
         elif policy_choice == "ML Prediction":
             filtered_df = filtered_df[filtered_df["policy_override"] != 1]
+    if "threshold_override" in filtered_df.columns:
+        if threshold_choice == "Escalated":
+            filtered_df = filtered_df[filtered_df["threshold_override"] == 1]
+        elif threshold_choice == "Within Bar":
+            filtered_df = filtered_df[filtered_df["threshold_override"] != 1]
 
     if "team" in df.columns and df["team"].notna().any():
         team_options = sorted(df["team"].dropna().unique().tolist())
@@ -190,7 +214,7 @@ else:
     row1[2].metric("Delayed", int((df["decision"] == "delay").sum()))
     row1[3].metric("Rejected", int((df["decision"] == "reject").sum()))
 
-    row2 = st.columns(4)
+    row2 = st.columns(5)
     if "confidence" in df.columns and df["confidence"].notna().any():
         row2[0].metric("Avg. ML Confidence", f"{df['confidence'].mean() * 100:.0f}%")
     else:
@@ -199,12 +223,16 @@ else:
         row2[1].metric("Policy Overrides", int((df["policy_override"] == 1).sum()))
     else:
         row2[1].metric("Policy Overrides", "N/A")
-    if "model" in df.columns:
-        row2[2].metric("ML Predictions Used", int(df["model"].notna().sum()))
+    if "threshold_override" in df.columns:
+        row2[2].metric("Threshold Escalations", int((df["threshold_override"] == 1).sum()))
     else:
-        row2[2].metric("ML Predictions Used", "N/A")
+        row2[2].metric("Threshold Escalations", "N/A")
+    if "model" in df.columns:
+        row2[3].metric("ML Predictions Used", int(df["model"].notna().sum()))
+    else:
+        row2[3].metric("ML Predictions Used", "N/A")
     latest = df.iloc[0]  # /history returns newest first
-    row2[3].metric("Current Model Version", f"{latest.get('model') or 'N/A'} {latest.get('model_version') or ''}".strip())
+    row2[4].metric("Current Model Version", f"{latest.get('model') or 'N/A'} {latest.get('model_version') or ''}".strip())
 
     # ---- DEV-009: deployment verification KPIs ----
     row3 = st.columns(4)
@@ -285,6 +313,40 @@ else:
     else:
         st.caption("No verified deployments yet -- the accuracy trend will appear once daily outcomes are available.")
 
+    # ---- Failure Rate Impact ----
+    # "Reduction in failed deployments" from the brief, answered honestly:
+    # compares the pre-tool baseline (deployment_history.csv -- 500
+    # deployments that shipped with zero AI gating) against the real
+    # failure rate among deployments THIS TOOL approved and that have
+    # since been verified. See accuracy_metrics.compute_failure_rate_impact.
+    st.subheader("Failure Rate Impact")
+    impact = load_failure_rate_impact()
+    baseline_rate = impact.get("baseline_fail_rate") if impact else None
+    actual_rate = impact.get("actual_fail_rate") if impact else None
+    reduction = impact.get("reduction_pct") if impact else None
+    sample_size = impact.get("sample_size") if impact else 0
+
+    row6 = st.columns(3)
+    row6[0].metric("Baseline Failure Rate (pre-tool)", f"{baseline_rate * 100:.0f}%" if baseline_rate is not None else "N/A")
+    row6[1].metric("Actual Failure Rate (AI-approved)", f"{actual_rate * 100:.0f}%" if actual_rate is not None else "N/A")
+    row6[2].metric(
+        "Reduction",
+        f"{reduction:+.0f}%" if reduction is not None else "N/A",
+        delta=f"{reduction:.0f}%" if reduction is not None else None,
+        delta_color="normal",
+    )
+    if sample_size:
+        st.caption(
+            f"Actual rate is measured across {sample_size} AI-approved, verified deployment(s). "
+            "Baseline is the 500-deployment pre-tool starter history with no AI gating applied."
+        )
+    else:
+        st.caption(
+            "No AI-approved deployments have a verified outcome yet -- 'Actual' and 'Reduction' will "
+            "populate as real deployments run through /predict and /deployment-verification. "
+            "Baseline is the 500-deployment pre-tool starter history with no AI gating applied."
+        )
+
     st.divider()
 
     # ---- Latest deployment summary ----
@@ -296,10 +358,11 @@ else:
     confidence = latest.get("confidence")
     lat_row1[3].metric("ML Confidence", f"{confidence * 100:.0f}%" if pd.notna(confidence) else "N/A")
 
-    lat_row2 = st.columns(3)
+    lat_row2 = st.columns(4)
     lat_row2[0].metric("Model", str(latest.get("model") or "N/A"))
     lat_row2[1].metric("Policy Status", policy_label(latest.get("policy_override")))
-    lat_row2[2].metric("Timestamp", str(latest.get("created_at") or "N/A"))
+    lat_row2[2].metric("Threshold Status", threshold_label(latest.get("threshold_override")))
+    lat_row2[3].metric("Timestamp", str(latest.get("created_at") or "N/A"))
 
     with st.expander("🤖 AI Explanation (Reasoning)"):
         st.write(latest.get("reasoning") or "No reasoning recorded for this deployment.")
@@ -318,6 +381,18 @@ else:
             st.markdown("\n".join(f"- {policy}" for policy in triggered_policies))
     else:
         st.success("🟢 ML Prediction Accepted (no policy override)")
+
+    st.markdown("**Threshold Calibration**")
+    if bool(latest.get("threshold_override")):
+        st.warning("🟠 Threshold Calibration Escalation Applied")
+        st.write(latest.get("threshold_reason") or "No threshold escalation reason recorded.")
+        triggered_thresholds = latest.get("triggered_thresholds")
+        if not isinstance(triggered_thresholds, list):
+            triggered_thresholds = []
+        if triggered_thresholds:
+            st.markdown("\n".join(f"- {threshold}" for threshold in triggered_thresholds))
+    else:
+        st.success("🟢 Meets current threshold bar (no escalation)")
 
     st.markdown("**Deployment Verification**")
     verification_status = latest.get("deployment_status")
@@ -367,12 +442,19 @@ else:
         else:
             st.caption("No policy override data available yet.")
     with chart_row2[1]:
-        st.caption("Average Confidence by Risk Level")
-        if "confidence" in df.columns and df["confidence"].notna().any():
-            confidence_by_risk = df.groupby("risk_level")["confidence"].mean().reindex(["Low", "Medium", "High"])
-            st.bar_chart(confidence_by_risk)
+        st.caption("Threshold Calibration Distribution")
+        if "threshold_override" in df.columns:
+            threshold_counts = df["threshold_override"].apply(lambda v: "Escalated" if v == 1 else "Within Bar").value_counts()
+            st.bar_chart(threshold_counts)
         else:
-            st.caption("No confidence data available yet.")
+            st.caption("No threshold calibration data available yet.")
+
+    st.caption("Average Confidence by Risk Level")
+    if "confidence" in df.columns and df["confidence"].notna().any():
+        confidence_by_risk = df.groupby("risk_level")["confidence"].mean().reindex(["Low", "Medium", "High"])
+        st.bar_chart(confidence_by_risk)
+    else:
+        st.caption("No confidence data available yet.")
 
     # ---- Predicted vs actual accuracy (only works once outcomes are filled in) ----
     st.subheader("Predicted Risk vs Actual Outcome")
@@ -398,6 +480,8 @@ else:
         table_df["decision"] = table_df["decision"].apply(decision_label)
     if "policy_override" in table_df.columns:
         table_df["policy_override"] = table_df["policy_override"].apply(policy_label)
+    if "threshold_override" in table_df.columns:
+        table_df["threshold_override"] = table_df["threshold_override"].apply(threshold_label)
     if "confidence" in table_df.columns:
         table_df["confidence"] = table_df["confidence"].apply(lambda v: f"{v * 100:.0f}%" if pd.notna(v) else "N/A")
     if "deployment_status" in table_df.columns:
@@ -409,9 +493,10 @@ else:
 
     column_order = [
         "deployment_id", "created_at", "risk_level", "decision", "confidence",
-        "policy_override", "model", "model_version", "team", "environment",
+        "policy_override", "threshold_override", "model", "model_version", "team", "environment",
         "author", "suggested_action", "reasoning", "policy_reason",
-        "triggered_policies", "files_changed", "test_coverage_pct",
+        "triggered_policies", "threshold_reason", "triggered_thresholds",
+        "files_changed", "test_coverage_pct",
         "deployment_status", "verification_time",
         "recovery_status", "rollback_recommended", "recovery_reason",
         "actual_outcome", "incident_severity",
@@ -420,10 +505,13 @@ else:
     display_names = {
         "deployment_id": "Deployment", "created_at": "Timestamp", "risk_level": "Risk",
         "decision": "Decision", "confidence": "Confidence", "policy_override": "Policy Override",
+        "threshold_override": "Threshold Calibration",
         "model": "Model", "model_version": "Model Version", "team": "Team",
         "environment": "Environment", "author": "Author", "suggested_action": "Suggested Action",
         "reasoning": "Reasoning", "policy_reason": "Policy Reason",
-        "triggered_policies": "Triggered Policies", "files_changed": "Files Changed",
+        "triggered_policies": "Triggered Policies",
+        "threshold_reason": "Threshold Reason", "triggered_thresholds": "Triggered Thresholds",
+        "files_changed": "Files Changed",
         "test_coverage_pct": "Test Coverage %",
         "deployment_status": "Deployment Status", "verification_time": "Verified At",
         "recovery_status": "Recovery Status", "rollback_recommended": "Rollback Recommended",

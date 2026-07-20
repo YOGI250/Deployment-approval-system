@@ -3,16 +3,23 @@ risk_scorer.py
 
 Purpose: orchestrates one deployment's risk decision end to end:
 
-    deployment -> feature_engineering -> ml.predictor -> decision_engine
+    deployment -> feature_engineering -> ml.predictor -> policy_engine
+               -> threshold_engine -> decision_engine
                -> Groq (explanation only) -> merged response
 
 The ML model (Random Forest, via app/ml/predictor.py) is the sole
-source of risk_level and confidence. decision_engine.py is the sole
-source of the business decision (approve/delay/reject). Groq is called
-only to generate human-readable reasoning and a suggested mitigation
-step for a risk level it did not choose -- it never determines risk,
-confidence, or decision, and its output is discarded/ignored for those
-fields even if it tries to include them.
+source of the initial risk_level and confidence. policy_engine.py can
+then override it for mandatory enterprise safety violations, and
+threshold_engine.py can escalate it one further level if it doesn't meet
+data/risk_thresholds.json's calibrated bar for its tier (see that
+module's docstring -- this is what makes threshold recalibration a real,
+decision-affecting mechanism). decision_engine.py is the sole source of
+the business decision (approve/delay/reject), applied to whatever risk
+level survives both layers. Groq is called only to generate
+human-readable reasoning and a suggested mitigation step for a risk
+level it did not choose -- it never determines risk, confidence, or
+decision, and its output is discarded/ignored for those fields even if
+it tries to include them.
 
 Before running: set your Groq API key as an environment variable:
     export GROQ_API_KEY="your-key-here"        (Mac/Linux)
@@ -30,9 +37,10 @@ import logging
 import env_loader  # loads .env file automatically -- must come before reading env vars
 from groq import Groq
 
-from feature_engineering import build_features, calculate_author_success_rate
+from feature_engineering import build_features, calculate_author_success_rate, calculate_team_success_rate
 from ml.predictor import predict as ml_predict
 from policy_engine import evaluate_policies
+from threshold_engine import evaluate_thresholds
 from decision_engine import decide_action
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -52,10 +60,10 @@ def load_thresholds() -> dict:
     Loads risk thresholds from an external config file instead of having
     them hardcoded in the prompt text. adjust_thresholds.py can rewrite
     this file based on real outcomes, and every subsequent call picks up
-    the change immediately, no code deploy needed. These thresholds are
-    no longer used to classify risk (the ML model does that) -- they're
-    passed to Groq purely as reference context to help it explain a
-    decision in terms a reviewer will recognize.
+    the change immediately, no code deploy needed. Used two ways: as the
+    calibration bar threshold_engine.py checks the risk level against
+    (a real, decision-affecting use), and passed to Groq as reference
+    context so its explanation talks in terms a reviewer will recognize.
     """
     try:
         with open(THRESHOLDS_PATH) as f:
@@ -79,7 +87,11 @@ MODEL = "llama-3.3-70b-versatile"
 # v4.0: the risk level Groq explains may now reflect a deterministic
 # enterprise policy override (see policy_engine.py) applied after the ML
 # prediction -- Groq is told when that happened and why.
-PROMPT_VERSION = "v4.0-policy-engine-integrated"
+# v5.0: the risk level may also reflect a threshold calibration
+# escalation (see threshold_engine.py), applied after any policy
+# override -- Groq is told when that happened and why, separately from
+# a policy override, since they're distinct mechanisms.
+PROMPT_VERSION = "v5.0-threshold-engine-integrated"
 
 # Real teams don't treat every file as equally risky -- a change to a
 # payment or auth file is inherently higher stakes than a change to docs
@@ -161,8 +173,12 @@ computed a confidence score. In some cases, a mandatory enterprise safety policy
 then overridden that prediction -- if the deployment summary below includes an
 "Enterprise Policy Override Applied" section, the risk level you are explaining is the
 POLICY's final decision, not the model's raw statistical one; ground your explanation
-in the stated policy reason rather than re-deriving it from the raw factors alone.
-Either way, your job is NOT to classify or second-guess the risk level -- it is final.
+in the stated policy reason rather than re-deriving it from the raw factors alone. On
+top of that, if the summary also includes a "Threshold Calibration Escalation Applied"
+section, the risk level was escalated one further level because it didn't meet this
+team's current calibrated bar for its tier (see the reference thresholds below) --
+ground your explanation in that stated reason too when present. Either way, your job
+is NOT to classify or second-guess the risk level -- it is final.
 Your job is to:
 1. Explain in 1-2 short sentences WHY this deployment likely received that risk level,
    referencing the specific factors that most plausibly drove it (files/lines changed,
@@ -190,26 +206,32 @@ def build_deployment_description(
     history_rows: list = None,
     prediction: dict = None,
     policy_override: dict = None,
+    threshold_override: dict = None,
 ) -> str:
     """
     Turns one row of deployment data into a clear description for the
     LLM, including file criticality and grounding from similar past
     deployments when available (the RAG piece). When `prediction` is
-    provided (the FINAL risk decision -- ML output, or ML output after a
-    policy override), it's appended so Groq knows what it's explaining --
-    omitted entirely for callers that don't pass it, so this stays
-    backward compatible with pre-DEV-002 callers/tests. When
-    `policy_override` is also provided (only set when a policy actually
-    changed the outcome), an additional block spells out the ML
-    prediction vs. the enterprise policy override and why, so Groq
-    explains the real reason instead of guessing from raw factors alone.
+    provided (the FINAL risk decision -- ML output, possibly adjusted by
+    a policy override and/or threshold calibration), it's appended so
+    Groq knows what it's explaining -- omitted entirely for callers that
+    don't pass it, so this stays backward compatible with pre-DEV-002
+    callers/tests. When `policy_override` is also provided (only set
+    when a policy actually changed the outcome), an additional block
+    spells out the ML prediction vs. the enterprise policy override and
+    why. When `threshold_override` is provided (only set when
+    threshold_engine.py escalated the risk one level -- see that
+    module's docstring), a further block spells out that the risk level
+    it's explaining didn't meet risk_thresholds.json's current bar for
+    its tier and was escalated as a result, so Groq explains the real
+    reason instead of guessing from raw factors alone.
     """
     changed_files = deployment.get("changed_files", [])
     criticality = classify_file_criticality(changed_files)
 
     description = f"""Deployment details:
 - Author: {deployment['author']} (recent success rate: {deployment.get('author_recent_success_rate', 'unknown')})
-- Team: {deployment['team']}
+- Team: {deployment['team']} (recent success rate: {deployment.get('team_recent_success_rate', 'unknown')})
 - Files changed: {deployment['files_changed']}
 - Lines changed: {deployment['lines_changed']}
 - Test coverage: {deployment['test_coverage_pct']}%
@@ -246,6 +268,14 @@ def build_deployment_description(
             f"ML Prediction:\n{policy_override['ml_prediction']}\n\n"
             f"Enterprise Policy Override:\n{policy_override['policy_override']}\n\n"
             f"Reason:\n{policy_override['reason']}\n"
+        )
+
+    if threshold_override:
+        description += (
+            f"\nThreshold Calibration Escalation Applied:\n"
+            f"Risk Level Before Calibration:\n{threshold_override['pre_threshold_risk']}\n\n"
+            f"Risk Level After Calibration:\n{threshold_override['threshold_override']}\n\n"
+            f"Reason:\n{threshold_override['reason']}\n"
         )
 
     return description
@@ -314,25 +344,34 @@ def score_deployment(deployment: dict, history_rows: list = None, max_retries: i
     Orchestrates the full pipeline for one deployment:
 
         deployment -> feature_engineering -> ml.predictor -> policy_engine
-                   -> decision_engine -> Groq (explanation only) -> response
+                   -> threshold_engine -> decision_engine -> Groq (explanation only) -> response
 
     Returns:
         {
-            "risk_level": "...", "confidence": 0.xx,        # from ML, possibly overridden by policy
-            "decision": "...",                               # from decision_engine, on the FINAL risk_level
+            "risk_level": "...", "confidence": 0.xx,   # from ML, possibly overridden by policy and/or threshold calibration
+            "decision": "...",                          # from decision_engine, on the FINAL risk_level
             "reasoning": "...", "suggested_action": "...",   # from Groq
             "model": "RandomForest", "model_version": "1.0",
             "prompt_version": "...", "degraded": bool,
             "policy_override": bool, "policy_reason": "..." | None,
             "triggered_policies": [...],
+            "threshold_override": bool, "threshold_reason": "..." | None,
+            "triggered_thresholds": [...],
         }
 
-    risk_level, confidence, decision, and the policy fields are unaffected
-    by any Groq failure -- only reasoning/suggested_action degrade to a
-    safe placeholder if the explanation call fails, since Groq no longer
-    has any say in the risk judgment itself. confidence always reflects
-    the ML model's own confidence in its original prediction, even when a
-    policy override changes the risk_level that prediction gets attached to.
+    risk_level, confidence, decision, and the policy/threshold fields are
+    unaffected by any Groq failure -- only reasoning/suggested_action
+    degrade to a safe placeholder if the explanation call fails, since
+    Groq no longer has any say in the risk judgment itself. confidence
+    always reflects the ML model's own confidence in its original
+    prediction, even when a policy override or threshold escalation
+    changes the risk_level that prediction gets attached to.
+
+    threshold_engine runs after policy_engine on purpose: policy's rules
+    are mandatory safety gates and must win outright, while threshold
+    calibration is a softer "does this still meet today's bar for its
+    tier" check layered on top of whatever policy already decided --
+    see threshold_engine.py's docstring.
     """
     history_rows = history_rows or []
 
@@ -340,21 +379,31 @@ def score_deployment(deployment: dict, history_rows: list = None, max_retries: i
     ml_result = ml_predict(features)
 
     policy_result = evaluate_policies(deployment, ml_result)
-    final_risk_level = policy_result["risk_level"]
-    decision = decide_action(final_risk_level)  # decision engine sees the risk AFTER policy validation
+    post_policy_risk_level = policy_result["risk_level"]
 
     if policy_result["overridden"]:
         # Application log only -- never returned from the API. Kept here
         # (not in api.py) because this is the one place that has both the
-        # original ML prediction and the final, policy-adjusted risk in
-        # scope at the same time.
+        # original ML prediction and the policy-adjusted risk in scope at
+        # the same time.
         logger.warning(
-            "Policy override applied: deployment_id=%s original_ml_prediction=%s final_risk=%s triggered_policies=%s reason=%s",
-            deployment.get("deployment_id"), ml_result["risk_level"], final_risk_level,
+            "Policy override applied: deployment_id=%s original_ml_prediction=%s post_policy_risk=%s triggered_policies=%s reason=%s",
+            deployment.get("deployment_id"), ml_result["risk_level"], post_policy_risk_level,
             policy_result["policy_triggered"], policy_result["override_reason"],
         )
 
     thresholds = load_thresholds()  # loaded fresh every call, so threshold edits take effect immediately
+    threshold_result = evaluate_thresholds(deployment, post_policy_risk_level, thresholds)
+    final_risk_level = threshold_result["risk_level"]
+    decision = decide_action(final_risk_level)  # decision engine sees the risk AFTER policy + threshold calibration
+
+    if threshold_result["overridden"]:
+        logger.warning(
+            "Threshold calibration escalated: deployment_id=%s pre_threshold_risk=%s final_risk=%s triggered_thresholds=%s reason=%s",
+            deployment.get("deployment_id"), post_policy_risk_level, final_risk_level,
+            threshold_result["thresholds_triggered"], threshold_result["override_reason"],
+        )
+
     system_prompt = build_system_prompt(thresholds)
 
     final_prediction = dict(ml_result)
@@ -364,12 +413,22 @@ def score_deployment(deployment: dict, history_rows: list = None, max_retries: i
     if policy_result["overridden"]:
         policy_override_context = {
             "ml_prediction": ml_result["risk_level"],
-            "policy_override": final_risk_level,
+            "policy_override": post_policy_risk_level,
             "reason": policy_result["override_reason"],
         }
 
+    threshold_override_context = None
+    if threshold_result["overridden"]:
+        threshold_override_context = {
+            "pre_threshold_risk": post_policy_risk_level,
+            "threshold_override": final_risk_level,
+            "reason": threshold_result["override_reason"],
+        }
+
     description = build_deployment_description(
-        deployment, history_rows, prediction=final_prediction, policy_override=policy_override_context
+        deployment, history_rows, prediction=final_prediction,
+        policy_override=policy_override_context,
+        threshold_override=threshold_override_context,
     )
 
     explanation = _generate_explanation(system_prompt, description, max_retries)
@@ -387,6 +446,9 @@ def score_deployment(deployment: dict, history_rows: list = None, max_retries: i
         "policy_override": policy_result["overridden"],
         "policy_reason": policy_result["override_reason"],
         "triggered_policies": policy_result["policy_triggered"],
+        "threshold_override": threshold_result["overridden"],
+        "threshold_reason": threshold_result["override_reason"],
+        "triggered_thresholds": threshold_result["thresholds_triggered"],
     }
 
 

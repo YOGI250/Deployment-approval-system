@@ -15,18 +15,44 @@ or care what's behind them.
 
 import json
 from datetime import datetime
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 from sqlalchemy.exc import SQLAlchemyError
 from database import engine, SessionLocal, Base
 from models import AuditLog
 
 
+# Columns added after the table's first deployment to Neon --
+# Base.metadata.create_all() below only creates a table that doesn't
+# exist yet, it never ALTERs an existing one, so new columns need their
+# own migration step. SQLite (used by the test suite's isolated_db
+# fixture) doesn't support "ADD COLUMN IF NOT EXISTS", so existence is
+# checked explicitly via inspect() instead of relying on that syntax --
+# works the same way against both SQLite and Postgres.
+_NEW_COLUMNS = [
+    ("lines_changed", "INTEGER"),
+    ("tests_failed", "INTEGER"),
+    ("changed_files", "TEXT"),
+    ("day_of_week", "TEXT"),
+    ("hour", "INTEGER"),
+    ("threshold_override", "INTEGER"),
+    ("threshold_reason", "TEXT"),
+    ("triggered_thresholds", "TEXT"),
+]
+
+
 def init_db():
     """
-    Creates the audit_log table if it doesn't already exist.
+    Creates the audit_log table if it doesn't already exist, then adds
+    any columns that were introduced after the table's first deploy.
     Safe to call every time the API starts -- won't wipe existing data.
     """
     Base.metadata.create_all(bind=engine)
+
+    existing_columns = {col["name"] for col in inspect(engine).get_columns("audit_log")}
+    with engine.begin() as conn:
+        for name, col_type in _NEW_COLUMNS:
+            if name not in existing_columns:
+                conn.execute(text(f"ALTER TABLE audit_log ADD COLUMN {name} {col_type}"))
 
 
 def check_connection() -> bool:
@@ -51,9 +77,10 @@ def log_decision(deployment: dict, result: dict, decision: str):
     incident_severity start empty -- they get filled in later when we
     find out what really happened (the feedback loop piece).
 
-    Also persists the full ML + policy traceability trail (confidence,
-    model, model_version, policy_override, policy_reason,
-    triggered_policies) so an auditor can reconstruct exactly why a
+    Also persists the full ML + policy + threshold traceability trail
+    (confidence, model, model_version, policy_override, policy_reason,
+    triggered_policies, threshold_override, threshold_reason,
+    triggered_thresholds) so an auditor can reconstruct exactly why a
     deployment received its final decision without needing to re-run the
     pipeline. Extra keys result might carry are ignored via .get() --
     this stays safe even if callers pass an older, smaller result dict.
@@ -65,7 +92,12 @@ def log_decision(deployment: dict, result: dict, decision: str):
             author=deployment.get("author"),
             team=deployment.get("team"),
             files_changed=deployment.get("files_changed"),
+            lines_changed=deployment.get("lines_changed"),
             test_coverage_pct=deployment.get("test_coverage_pct"),
+            tests_failed=deployment.get("tests_failed"),
+            changed_files=json.dumps(deployment.get("changed_files") or []),
+            day_of_week=deployment.get("day_of_week"),
+            hour=deployment.get("hour"),
             environment=deployment.get("environment"),
             risk_level=result.get("risk_level"),
             reasoning=result.get("reasoning"),
@@ -83,6 +115,9 @@ def log_decision(deployment: dict, result: dict, decision: str):
             policy_override=1 if result.get("policy_override") else 0,
             policy_reason=result.get("policy_reason"),
             triggered_policies=json.dumps(result.get("triggered_policies") or []),
+            threshold_override=1 if result.get("threshold_override") else 0,
+            threshold_reason=result.get("threshold_reason"),
+            triggered_thresholds=json.dumps(result.get("triggered_thresholds") or []),
             created_at=datetime.now().isoformat(),
         ))
         session.commit()
@@ -195,6 +230,18 @@ def get_all_logs():
             row["health_check"] = json.loads(raw_health_check) if raw_health_check else None
         except (TypeError, ValueError):
             row["health_check"] = None
+
+        raw_changed_files = row.get("changed_files")
+        try:
+            row["changed_files"] = json.loads(raw_changed_files) if raw_changed_files else []
+        except (TypeError, ValueError):
+            row["changed_files"] = []
+
+        raw_triggered_thresholds = row.get("triggered_thresholds")
+        try:
+            row["triggered_thresholds"] = json.loads(raw_triggered_thresholds) if raw_triggered_thresholds else []
+        except (TypeError, ValueError):
+            row["triggered_thresholds"] = []
 
     return result
 

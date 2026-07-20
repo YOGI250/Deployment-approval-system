@@ -3,20 +3,20 @@ test_audit_log.py
 
 DEV-004: verifies the audit trail persists full ML + policy traceability
 (confidence, model, model_version, policy_override, policy_reason,
-triggered_policies) and that an old, pre-DEV-004 database migrates
-cleanly without requiring manual deletion.
+triggered_policies).
 
-Every test points audit_log.DB_FILE at a throwaway sqlite file via the
-`isolated_db` fixture below, so nothing here touches the real
-data/audit_log.db.
+Every test points audit_log at a throwaway sqlite-backed engine via the
+`isolated_db` fixture below, so nothing here touches the real Neon
+database.
 """
 
 import os
 import sys
 import json
-import sqlite3
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
@@ -25,9 +25,11 @@ import audit_log
 
 @pytest.fixture
 def isolated_db(monkeypatch, tmp_path):
-    """Points audit_log at a fresh, empty sqlite file for one test."""
+    """Points audit_log at a fresh, empty sqlite-backed engine for one test."""
     db_path = str(tmp_path / "test_audit_log.db")
-    monkeypatch.setattr(audit_log, "DB_FILE", db_path)
+    test_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(audit_log, "engine", test_engine)
+    monkeypatch.setattr(audit_log, "SessionLocal", sessionmaker(bind=test_engine, autoflush=False, autocommit=False))
     return db_path
 
 
@@ -155,73 +157,92 @@ class TestPolicyOverridePersistence:
         ]
 
 
-class TestMigrationFromOldDatabase:
-    def test_pre_dev004_database_migrates_without_manual_deletion(self, isolated_db):
-        """
-        Simulates a database created by the very first version of
-        audit_log.py -- before prompt_version, degraded, and everything
-        added since. init_db() must add the missing columns in place,
-        and log_decision()/get_all_logs() must work immediately after,
-        with no manual DB deletion or recreation required.
-        """
-        conn = sqlite3.connect(isolated_db)
-        conn.execute("""
-            CREATE TABLE audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                deployment_id TEXT,
-                author TEXT,
-                team TEXT,
-                files_changed INTEGER,
-                test_coverage_pct REAL,
-                environment TEXT,
-                risk_level TEXT,
-                reasoning TEXT,
-                suggested_action TEXT,
-                decision TEXT,
-                actual_outcome TEXT,
-                incident_severity TEXT,
-                created_at TEXT
-            )
-        """)
-        conn.execute("""
-            INSERT INTO audit_log (
-                deployment_id, author, team, files_changed, test_coverage_pct,
-                environment, risk_level, reasoning, suggested_action, decision,
-                actual_outcome, incident_severity, created_at
-            ) VALUES ('legacy-001', 'alice', 'payments', 5, 90.0, 'production',
-                      'Low', 'legacy row', 'None needed', 'approve', NULL, NULL,
-                      '2025-01-01T00:00:00')
-        """)
-        conn.commit()
-        conn.close()
+class TestTrainingFieldsPersistence:
+    """DEV-011: lines_changed/tests_failed/changed_files/day_of_week/hour
+    -- added so audit-log rows carry everything build_features() needs,
+    letting train_model.py blend real outcomes into training data."""
 
-        # This is the call every API startup makes -- must not raise, and
-        # must not require deleting/recreating the file first.
+    def test_new_fields_round_trip(self, isolated_db):
         audit_log.init_db()
+        deployment = {
+            **SAMPLE_DEPLOYMENT,
+            "lines_changed": 340,
+            "tests_failed": 1,
+            "changed_files": ["app/payment_gateway.py", "app/utils.py"],
+            "day_of_week": "Fri",
+            "hour": 18,
+        }
+        audit_log.log_decision(deployment, SAMPLE_RESULT_NO_OVERRIDE, decision="approve")
 
-        conn = sqlite3.connect(isolated_db)
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
-        conn.close()
-        for expected_column in (
-            "prompt_version", "degraded", "failed_at_stage", "pipeline_stage_success_ratio",
-            "confidence", "model", "model_version",
-            "policy_override", "policy_reason", "triggered_policies",
-        ):
-            assert expected_column in columns, f"migration did not add {expected_column}"
+        row = audit_log.get_all_logs()[0]
+        assert row["lines_changed"] == 340
+        assert row["tests_failed"] == 1
+        assert row["changed_files"] == ["app/payment_gateway.py", "app/utils.py"]
+        assert isinstance(row["changed_files"], list)  # decoded from JSON, not the raw string
+        assert row["day_of_week"] == "Fri"
+        assert row["hour"] == 18
 
-        # the pre-existing legacy row must survive the migration untouched
-        rows = audit_log.get_all_logs()
-        assert len(rows) == 1
-        assert rows[0]["deployment_id"] == "legacy-001"
-        assert rows[0]["risk_level"] == "Low"
-        assert rows[0]["confidence"] is None  # column didn't exist when this row was written
-        assert rows[0]["triggered_policies"] == []  # NULL decodes to an empty list, not a crash
+    def test_missing_new_fields_default_to_none_or_empty_list(self, isolated_db):
+        """SAMPLE_DEPLOYMENT predates these fields -- must not crash."""
+        audit_log.init_db()
+        audit_log.log_decision(SAMPLE_DEPLOYMENT, SAMPLE_RESULT_NO_OVERRIDE, decision="approve")
 
-        # and new rows can be written immediately after migration
-        audit_log.log_decision(SAMPLE_DEPLOYMENT, SAMPLE_RESULT_WITH_OVERRIDE, decision="reject")
-        rows = audit_log.get_all_logs()
-        assert len(rows) == 2
+        row = audit_log.get_all_logs()[0]
+        assert row["lines_changed"] is None
+        assert row["tests_failed"] is None
+        assert row["changed_files"] == []
+        assert row["day_of_week"] is None
+        assert row["hour"] is None
 
+
+class TestThresholdFieldsPersistence:
+    """DEV-012: threshold_override/threshold_reason/triggered_thresholds
+    -- added so threshold_engine.py's escalation decisions are just as
+    auditable as policy_engine's overrides, mirroring
+    TestPolicyOverridePersistence/TestNoOverridePersistence above."""
+
+    def test_no_threshold_override_defaults_are_falsy_and_empty_list(self, isolated_db):
+        audit_log.init_db()
+        audit_log.log_decision(SAMPLE_DEPLOYMENT, SAMPLE_RESULT_NO_OVERRIDE, decision="approve")
+
+        row = audit_log.get_all_logs()[0]
+        assert row["threshold_override"] == 0
+        assert row["threshold_reason"] is None
+        assert row["triggered_thresholds"] == []  # decoded from JSON, not the string "[]"
+
+    def test_threshold_override_fields_persist_and_triggered_thresholds_is_a_real_list(self, isolated_db):
+        audit_log.init_db()
+        result = {
+            **SAMPLE_RESULT_NO_OVERRIDE,
+            "risk_level": "Medium",
+            "threshold_override": True,
+            "threshold_reason": "Deployment landed in Low but doesn't meet the current Low threshold bar: test coverage 50% is below this tier's minimum of 85%",
+            "triggered_thresholds": ["low_threshold_violation"],
+        }
+        audit_log.log_decision(SAMPLE_DEPLOYMENT, result, decision="delay")
+
+        row = audit_log.get_all_logs()[0]
+        assert row["threshold_override"] == 1
+        assert row["threshold_reason"] == result["threshold_reason"]
+        assert row["triggered_thresholds"] == ["low_threshold_violation"]
+        assert isinstance(row["triggered_thresholds"], list)  # not a comma-separated string
+
+    def test_result_missing_threshold_keys_entirely_does_not_crash(self, isolated_db):
+        """Older-shaped result dicts (pre-DEV-012) must still insert safely."""
+        audit_log.init_db()
+        minimal_result = {
+            "risk_level": "Low", "reasoning": "ok", "suggested_action": "None needed",
+            "prompt_version": "v4.0-policy-engine-integrated", "degraded": False,
+        }
+        audit_log.log_decision(SAMPLE_DEPLOYMENT, minimal_result, decision="approve")
+
+        row = audit_log.get_all_logs()[0]
+        assert row["threshold_override"] == 0
+        assert row["threshold_reason"] is None
+        assert row["triggered_thresholds"] == []
+
+
+class TestInitDbIdempotency:
     def test_init_db_is_idempotent(self, isolated_db):
         """Calling init_db() repeatedly (every API startup) must not error or duplicate columns."""
         audit_log.init_db()
